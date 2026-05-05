@@ -17,6 +17,29 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<!-- Firebase init for live data overrides (Option A + B integration) -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, collection, doc, getDoc, getDocs, query, where, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDmUGL8Tyfy74OMjgaBZlFK-PTFG3AYYK0",
+    authDomain: "sth-cartage.firebaseapp.com",
+    projectId: "sth-cartage",
+    storageBucket: "sth-cartage.firebasestorage.app",
+    messagingSenderId: "613314698438",
+    appId: "1:613314698438:web:6acb8a91215b5a8efe0bc7"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  window.sthLive = { db, collection, doc, getDoc, getDocs, query, where, onSnapshot, ready: true };
+  window.dispatchEvent(new CustomEvent('firebase-ready'));
+</script>
 <style>
   :root {
     --charcoal: #2E3038;
@@ -356,6 +379,23 @@
     font-size: 10px;
   }
 
+  /* LIVE indicator — pulsing yellow dot for cells driven by real-time Firebase data */
+  .live-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--yellow);
+    margin-left: 5px;
+    vertical-align: middle;
+    animation: livePulse 1.6s ease-in-out infinite;
+    box-shadow: 0 0 6px rgba(245,200,0,0.6);
+  }
+  @keyframes livePulse {
+    0%, 100% { opacity: 0.4; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.25); }
+  }
+
   .job-footer {
     padding: 10px 18px;
     background: var(--panel-2);
@@ -518,9 +558,10 @@
       const cells = MATERIALS.map(m => {
         const d = j.materials[m.key];
         const p = pctClamped(d.actual, d.boq);
+        const liveDot = d.live ? '<span class="live-dot" title="Live from Firebase"></span>' : '';
         return `
           <div class="material-cell">
-            <div class="name">${m.label}</div>
+            <div class="name">${m.label}${liveDot}</div>
             ${gauge(p, 'sm')}
             <div class="nums">
               <div><span class="actual">${fmt(d.actual)}</span> <span class="unit-txt">${m.unit}</span></div>
@@ -626,6 +667,15 @@
       renderSummary();
       renderJobs();
       renderTicker();
+
+      // Apply live overrides from Firebase (Option A + B integration)
+      // — overrides happen in the background after the weekly batch renders,
+      //   so the screen never flickers
+      applyLiveOverrides().then(() => {
+        renderSummary();
+        renderJobs();
+        renderTicker();
+      }).catch(err => console.warn('Live overrides failed (using batch data):', err));
     } catch (err) {
       console.error('Could not load data.json:', err);
       const grid = document.getElementById('jobs-grid');
@@ -633,6 +683,151 @@
         grid.innerHTML = '<div style="padding:40px;color:var(--text-dim);text-align:center;">Could not load data.json — check the file is present.</div>';
       }
     }
+  }
+
+  // ============ LIVE FIREBASE OVERRIDES ============
+  // Wait for Firebase to be ready (init runs in a separate <script type=module>)
+  function whenFirebaseReady() {
+    return new Promise((resolve, reject) => {
+      if (window.sthLive && window.sthLive.ready) return resolve(window.sthLive);
+      const timeout = setTimeout(() => reject(new Error('Firebase init timeout')), 8000);
+      window.addEventListener('firebase-ready', () => {
+        clearTimeout(timeout);
+        resolve(window.sthLive);
+      }, { once: true });
+    });
+  }
+
+  // Rough name normalisation — strips common road words, punctuation, lowercases.
+  // Used to match dashboard job names to Firebase project names.
+  function normalizeJobName(name) {
+    if (!name) return '';
+    return String(name)
+      .toLowerCase()
+      .replace(/[,\-–—_/\\.]/g, ' ')
+      .replace(/\b(rd|road|st|street|ave|avenue|dr|drive|cres|crescent|ct|court|lane|ln|terrace|tce|place|pl|hwy|highway|way|grove|gr)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Returns true if the two job names are a "rough match" (one contains the other after normalisation)
+  function jobNamesMatch(dashboardName, firebaseName) {
+    const a = normalizeJobName(dashboardName);
+    const b = normalizeJobName(firebaseName);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    // Check substring match in either direction (handles "7-9 Bald Hill" vs "Bald Hill")
+    return a.includes(b) || b.includes(a);
+  }
+
+  // Truck capacities in m³ (mirrors the cartage app's TRUCK_CAPACITIES)
+  const TRUCK_CAPACITIES_M3 = { 'Tandem': 10, 'TT': 22, 'Quad': 25 };
+
+  // Apply live overrides on top of the JOBS array loaded from data.json.
+  // - pilesDrilled.actual: count of done piles in matching Firebase job
+  // - lmDrilled.actual: sum of actualDepth across done piles
+  // - concrete.actual: sum of actualConcrete across done piles + cartage concrete loads
+  // - soil.actual: sum of cartage fill/topsoil/etc loads (m³)
+  async function applyLiveOverrides() {
+    const fb = await whenFirebaseReady();
+    const { db, collection, query, where, getDocs } = fb;
+
+    // Get all active Firebase jobs
+    const jobsQ = query(collection(db, 'jobs'), where('active', '==', true));
+    const jobsSnap = await getDocs(jobsQ);
+
+    if (jobsSnap.empty) return;
+
+    // Build a lookup of dashboard jobs by normalised name
+    const dashboardJobsByName = JOBS.map(j => ({ job: j, normalized: normalizeJobName(j.name) }));
+
+    // For each Firebase job, find matching dashboard job and compute live numbers
+    for (const jobDoc of jobsSnap.docs) {
+      const fbJob = jobDoc.data();
+      const fbProject = fbJob.project || '';
+      const fbJobId = jobDoc.id;
+
+      // Find matching dashboard job
+      const match = dashboardJobsByName.find(({ job }) => jobNamesMatch(job.name, fbProject));
+      if (!match) continue;
+      const dashJob = match.job;
+
+      // --- PILING OVERRIDES ---
+      if (fbJob.hasPiling) {
+        try {
+          const pilesSnap = await getDocs(collection(db, 'jobs', fbJobId, 'piles'));
+          let donePiles = 0;
+          let totalLm = 0;
+          let pileConcrete = 0;
+          pilesSnap.forEach(p => {
+            const d = p.data();
+            if (d.status === 'done') {
+              donePiles++;
+              if (typeof d.actualDepth === 'number') totalLm += d.actualDepth;
+              if (typeof d.actualConcrete === 'number') pileConcrete += d.actualConcrete;
+            }
+          });
+
+          if (dashJob.materials.pilesDrilled) {
+            dashJob.materials.pilesDrilled.actual = donePiles;
+            dashJob.materials.pilesDrilled.live = true;
+          }
+          if (dashJob.materials.lmDrilled) {
+            dashJob.materials.lmDrilled.actual = Math.round(totalLm);
+            dashJob.materials.lmDrilled.live = true;
+          }
+          // Concrete from piling (might be added to cartage concrete below)
+          dashJob._pileConcrete = pileConcrete;
+        } catch (e) {
+          console.warn('Piles read failed for', fbProject, e);
+        }
+      }
+
+      // --- CARTAGE OVERRIDES ---
+      try {
+        const trucksSnap = await getDocs(collection(db, 'jobs', fbJobId, 'trucks'));
+        let cartageConcrete = 0;
+        let cartageSoil = 0;
+
+        for (const truckDoc of trucksSnap.docs) {
+          const truck = truckDoc.data();
+          const cap = TRUCK_CAPACITIES_M3[truck.type] || 10;
+
+          const loadsSnap = await getDocs(collection(db, 'jobs', fbJobId, 'trucks', truckDoc.id, 'loads'));
+          loadsSnap.forEach(l => {
+            const load = l.data();
+            const mat = (load.material || '').toLowerCase();
+            if (mat.includes('concrete')) {
+              cartageConcrete += cap;
+            } else if (mat.includes('fill') || mat.includes('soil') || mat.includes('clay') ||
+                       mat.includes('mudstone') || mat.includes('rock') || mat.includes('sand') ||
+                       mat.includes('topsoil') || mat.includes('vegetation')) {
+              cartageSoil += cap;
+            }
+          });
+        }
+
+        // Concrete = pile concrete + cartage concrete (combined view of how much concrete went into the job)
+        if (dashJob.materials.concrete) {
+          const pileC = dashJob._pileConcrete || 0;
+          if (pileC > 0 || cartageConcrete > 0) {
+            dashJob.materials.concrete.actual = Math.round(pileC + cartageConcrete);
+            dashJob.materials.concrete.live = true;
+          }
+        }
+        // Soil from cartage only
+        if (dashJob.materials.soil && cartageSoil > 0) {
+          dashJob.materials.soil.actual = Math.round(cartageSoil);
+          dashJob.materials.soil.live = true;
+        }
+      } catch (e) {
+        console.warn('Cartage read failed for', fbProject, e);
+      }
+
+      delete dashJob._pileConcrete; // cleanup
+    }
+
+    console.log('[Live] Applied Firebase overrides to', jobsSnap.size, 'job(s)');
   }
 
   // Initial load + render
