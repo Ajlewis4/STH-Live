@@ -1,5 +1,5 @@
 {
-  "lastUpdated": "2026-05-07T15:07:31+10:00",
+  "lastUpdated": "2026-05-07T05:58:44+00:00",
   "weekEnding": "2026-05-07",
   "materials": [
     {
@@ -72,6 +72,10 @@
           "boq": 0,
           "week": 0
         }
+      },
+      "documents": {
+        "pile_logs": 24,
+        "dockets": 69
       }
     },
     {
@@ -112,7 +116,8 @@
           "boq": 126,
           "week": 0
         }
-      }
+      },
+      "documents": {}
     },
     {
       "id": "TBD",
@@ -152,7 +157,8 @@
           "boq": 0,
           "week": 0
         }
-      }
+      },
+      "documents": {}
     },
     {
       "id": "TBD",
@@ -192,7 +198,8 @@
           "boq": 0,
           "week": 0
         }
-      }
+      },
+      "documents": {}
     },
     {
       "id": "TBD",
@@ -232,7 +239,8 @@
           "boq": 0,
           "week": 0
         }
-      }
+      },
+      "documents": {}
     }
   ]
 }

@@ -439,6 +439,36 @@
     from { transform: translateX(0); }
     to { transform: translateX(-50%); }
   }
+
+  .job-docs {
+    padding: 8px 18px;
+    background: rgba(245, 200, 0, 0.04);
+    border-top: 1px solid var(--line);
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .doc-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .doc-pill .count {
+    color: var(--yellow);
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .doc-pill .label {
+    color: var(--text-faint);
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .doc-pill.empty .label {
+    color: var(--text-faint);
+    font-style: italic;
+  }
 </style>
 </head>
 <body>
@@ -550,6 +580,29 @@
     }).join('');
   }
 
+  const DOC_LABELS = {
+    dockets:   "Dockets",
+    pile_logs: "Pile Logs",
+    schedules: "Schedules",
+    drawings:  "Drawings",
+    other:     "Other",
+  };
+
+  function docsRow(j) {
+    const docs = j.documents || {};
+    const keys = Object.keys(docs).filter(k => docs[k] > 0);
+    if (keys.length === 0) {
+      return `<div class="job-docs"><div class="doc-pill empty"><span class="label">No docs filed yet</span></div></div>`;
+    }
+    const pills = keys.map(k => `
+      <div class="doc-pill">
+        <span class="count">${docs[k]}</span>
+        <span class="label">${DOC_LABELS[k] || k}</span>
+      </div>
+    `).join('');
+    return `<div class="job-docs">${pills}</div>`;
+  }
+
   function renderJobs() {
     document.getElementById('job-count').textContent = `${JOBS.length} JOBS`;
     const cardsHtml = JOBS.map(j => {
@@ -581,6 +634,7 @@
             <div class="status-badge ${statusClass}">${j.status}</div>
           </div>
           <div class="job-body">${cells}</div>
+          ${docsRow(j)}
           <div class="job-footer">
             <div><span class="label">SUPERVISOR</span><span class="val">${j.supervisor}</span></div>
             <div><span class="label">START</span><span class="val">${j.startDate}</span></div>
